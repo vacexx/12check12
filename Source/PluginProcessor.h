@@ -80,6 +80,8 @@ private:
         saturationIndex
     };
 
+    juce::SmoothedValue<float> smoothedTime;
+
     juce::dsp::ProcessorChain<juce::dsp::WaveShaper<float>> saturationChain;
 
     juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();

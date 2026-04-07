@@ -50,6 +50,10 @@ void _12check12AudioProcessor::prepareToPlay(double sampleRate, int samplesPerBl
     spec.maximumBlockSize = static_cast<juce::uint32>(samplesPerBlock);
     spec.numChannels = 1; // filtry zpracovávají kanály samostatně
 
+    // inicializace vyhlazování času
+    smoothedTime.reset(sampleRate, 0.05);
+	smoothedTime.setCurrentAndTargetValue(timeMsParam->load() /1000.0f);
+
     // inicializace StateVariableTPTFilter pro každý kanál
     for (int ch = 0; ch < maxChannels; ++ch)
     {
@@ -146,20 +150,20 @@ void _12check12AudioProcessor::processBlock(
         default: break;
         }
 
-        delayTimeSec = quarterNoteSec * multiplier;
+		smoothedTime.setTargetValue(quarterNoteSec * multiplier);
     }
     else
     {
-        delayTimeSec = timeMsParam->load() / 1000.0f;
+		smoothedTime.setTargetValue(timeMsParam->load() / 1000.0f);
     }
 
     const int delayBufferLength = delayBuffer.getNumSamples();
     if (delayBufferLength == 0)
         return;
 
-    const int delayInSamples = juce::jlimit(0,
-        delayBufferLength - 1,
-        static_cast<int>(delayTimeSec * currentSampleRate));
+    const float delayInSamplesFloat = juce::jlimit(0.0f,
+        static_cast<float>(delayBufferLength - 1),
+        delayTimeSec * static_cast<float>(currentSampleRate));
 
     // nastavení frekvencí filtrů (jednou za blok, ne pro každý vzorek)
     for (int ch = 0; ch < juce::jmin(numInputChannels, maxChannels); ++ch)
@@ -178,14 +182,41 @@ void _12check12AudioProcessor::processBlock(
 
     for (int i = 0; i < numSamples; ++i)
     {
-        int readPos = localWritePos - delayInSamples;
-        if (readPos < 0)
-            readPos += delayBufferLength;
+        // získání vyhlazené hodnoty pro vzorek
+        float currentDelaySec = smoothedTime.getNextValue();
+
+        // výpočet zpoždění ve vzorcích
+        float delayInSamplesFloat = currentDelaySec * static_cast<float>(currentSampleRate);
+        delayInSamplesFloat = juce::jlimit(0.0f,
+            static_cast<float>(delayBufferLength - 1),
+            delayInSamplesFloat);
+
+        // získání přesné desetinné pozice
+        float exactReadPos = static_cast<float>(localWritePos) - delayInSamplesFloat;
+
+        // ošetření bufferu (když čteme za začátkem)
+        if (exactReadPos < 0.0f)
+            exactReadPos += static_cast<float>(delayBufferLength);
+
+        // rozdělení na celočíselný index a zlomkovou část pro interpolaci
+        int index0 = static_cast<int>(exactReadPos);
+        float fraction = exactReadPos - static_cast<float>(index0);
+
+        // určení sousedního indexu (s ošetřením konce bufferu)
+        int index1 = index0 + 1;
+        if (index1 >= delayBufferLength)
+            index1 -= delayBufferLength;
 
         for (int ch = 0; ch < juce::jmin(numInputChannels, maxChannels); ++ch)
         {
             const float inSample = channelData[ch][i];
-            const float delayedSample = delayData[ch][readPos];
+
+            // načtení dvou sousedních vzorků
+            const float sample0 = delayData[ch][index0];
+            const float sample1 = delayData[ch][index1];
+
+            // lineární interpolace zpožděného vzorku
+            const float delayedSample = sample0 + fraction * (sample1 - sample0);
 
             // filtrace zpožděného vzorku
             float filtered = hpFilters[ch].processSample(0, delayedSample);
@@ -269,7 +300,18 @@ _12check12AudioProcessor::createParameterLayout()
     std::vector<std::unique_ptr<juce::RangedAudioParameter>> params;
 
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        "TIME", "Time", 0.0f, 1000.0f, 250.0f));
+        "TIME", "Time",
+        juce::NormalisableRange<float>(1.0f, 10000.0f, 1.0f, 0.3f),
+        250.0f,
+        juce::AudioParameterFloatAttributes()
+        .withStringFromValueFunction(
+            [](float value, int) {
+                if (value >= 1000.0f)
+                    return juce::String(value / 1000.0f, 2) + " s";
+                else
+                    return juce::String((int)value) + " ms";
+            })));
+
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         "FEEDBACK", "Feedback", 0.0f, 100.0f, 25.0f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
